@@ -1,0 +1,644 @@
+# aws cloudformation create-stack --stack-name stream-redshift --template-body file://streaming-infra.yaml --capabilities CAPABILITY_NAMED_IAM --parameters ParameterKey=S3BucketName,ParameterValue=280887266599-upsert ParameterKey=DatabaseUserPassword,ParameterValue=Ok4D6GyaELiC ParameterKey=SubnetAzA,ParameterValue=ap-southeast-1a ParameterKey=SubnetAzB,ParameterValue=ap-southeast-1b
+Parameters:
+  S3BucketName:
+    Type: String
+    Description: An Amazon S3 bucket that is used to store data, job scripts, etc.
+
+  DatabaseUserName:
+    Type: String
+    Description: A user name for Redshift cluster.
+    MinLength: 1
+    MaxLength: 16
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    Default: dbmaster
+    ConstraintDescription: must begin with a letter and contain only alphanumeric characters.
+
+  DatabaseUserPassword:
+    Type: String
+    Description: A user password for Redshift cluster. (8 characters minimum, 41 characters maximum.)
+    NoEcho: true
+    MinLength: 8
+    MaxLength: 41
+    AllowedPattern: '[a-zA-Z0-9]*'
+    ConstraintDescription: must contain only alphanumeric characters.
+
+  VPCCIDR:
+    Type: String
+    Description: CIDR of VPC. IPv4 address range in CIDR notation.
+    Default: "10.1.0.0/16"
+
+  PublicSubnetCIDR:
+    Type: String
+    Description: CIDR of a public subnet A. IPv4 address range in CIDR notation.
+    Default: "10.1.0.0/24"
+
+  PrivateSubnetACIDR:
+    Type: String
+    Description: CIDR of a private subnet A. IPv4 address range in CIDR notation.
+    Default: "10.1.100.0/24"
+
+  PrivateSubnetBCIDR:
+    Type: String
+    Description: CIDR of a private subnet B. IPv4 address range in CIDR notation.
+    Default: "10.1.200.0/24"
+
+  SubnetAzA:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Description: Availability zone for the private subnet A.
+
+  SubnetAzB:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Description: Availability zone for the private subnet B.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label:
+          default: General
+        Parameters:
+          - S3BucketName
+      -
+        Label:
+          default: Network Configuration
+        Parameters:
+          - VPCCIDR
+          - PublicSubnetCIDR
+          - PrivateSubnetACIDR
+          - PrivateSubnetBCIDR
+          - SubnetAzA
+          - SubnetAzB
+
+Resources:
+  # S3
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref S3BucketName
+      AccessControl: Private
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: True
+        BlockPublicPolicy: True
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True
+
+  S3CustomResource:
+    DependsOn: S3Bucket
+    Type: Custom::S3CustomResource
+    Properties:
+      ServiceToken: !GetAtt LambdaFunction.Arn
+      the_bucket: !Ref S3BucketName
+      the_streaming_job_script_file_key: script/streaming_cdc_kinesis2redshift.py
+      the_rds_ingest_job_script_file_key: script/rds_ingest_data.py
+      the_rds_upsert_job_script_file_key: script/rds_upsert_data.py
+      the_mysql_connector_lib_file_key: lib/mysql_connector_python-8.0.25-cp38-cp38-manylinux1_x86_64.whl
+      the_faker_lib_file_key: lib/Faker-8.11.0-py3-none-any.whl
+      the_origin_streaming_job_script_url: https://aws-bigdata-blog.s3.amazonaws.com/artifacts/glue_streaming_upsert_redshift/streaming_cdc_kinesis2redshift.py
+      the_origin_rds_ingest_job_script_url: https://aws-bigdata-blog.s3.amazonaws.com/artifacts/glue_streaming_upsert_redshift/rds_ingest_data.py
+      the_origin_rds_upsert_job_script_url: https://aws-bigdata-blog.s3.amazonaws.com/artifacts/glue_streaming_upsert_redshift/rds_upsert_data.py
+      the_origin_mysql_connector_url: https://files.pythonhosted.org/packages/d5/f8/1bd20c81de2487c35b20e08a1e079534a7b579b83a5bc85a4485673b7f79/mysql_connector_python-8.0.25-cp38-cp38-manylinux1_x86_64.whl
+      the_origin_faker_url: https://files.pythonhosted.org/packages/b2/7a/42bb20f3b612a7636c484ac2a17988d4a98ad14d169937c668c1962599e7/Faker-8.11.0-py3-none-any.whl
+
+  LambdaFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      FunctionName: !Sub 'lambda-custom-resource-${AWS::StackName}'
+      Description: This is used as an AWS CloudFormation custom resource to copy job scripts from an AWS Glue managed GitHub repository and an AWS Big Data blog  S3 bucket to your S3 bucket.
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 360
+      Runtime: python3.8
+      Code:
+        ZipFile: !Sub
+          - |
+            import boto3
+            from botocore.client import ClientError
+            import cfnresponse
+            import urllib.request
+            def handler(event, context):
+                # Init
+                the_event = event['RequestType'].strip()
+                print("The event is: ", the_event)
+                response_data = {}
+                s3 = boto3.client('s3')
+                s3_resource = boto3.resource('s3')
+                # Retrieve parameters
+                the_bucket = event['ResourceProperties']['the_bucket'].strip()
+                the_streaming_job_script_file_key = event['ResourceProperties']['the_streaming_job_script_file_key'].strip()
+                the_rds_ingest_job_script_file_key = event['ResourceProperties']['the_rds_ingest_job_script_file_key'].strip()
+                the_rds_upsert_job_script_file_key = event['ResourceProperties']['the_rds_upsert_job_script_file_key'].strip()
+                the_mysql_connector_lib_file_key = event['ResourceProperties']['the_mysql_connector_lib_file_key'].strip()
+                the_faker_lib_file_key = event['ResourceProperties']['the_faker_lib_file_key'].strip()
+                the_origin_streaming_job_script_url = event['ResourceProperties']['the_origin_streaming_job_script_url'].strip()
+                the_origin_rds_ingest_job_script_url = event['ResourceProperties']['the_origin_rds_ingest_job_script_url'].strip()
+                the_origin_rds_upsert_job_script_url = event['ResourceProperties']['the_origin_rds_upsert_job_script_url'].strip()
+                the_origin_mysql_connector_url = event['ResourceProperties']['the_origin_mysql_connector_url'].strip()
+                the_origin_faker_url = event['ResourceProperties']['the_origin_faker_url'].strip()
+                try:
+                    if the_event in ('Create', 'Update'):
+                        # Copying job script
+                        try:
+                            reqS = urllib.request.Request(the_origin_streaming_job_script_url, method='GET')
+                            urlDataS = urllib.request.urlopen(reqS).read().decode('utf-8')
+                            objS = s3_resource.Object(the_bucket,the_streaming_job_script_file_key)
+                            objS.put(Body = urlDataS)
+                            reqI = urllib.request.Request(the_origin_rds_ingest_job_script_url, method='GET')
+                            urlDataI = urllib.request.urlopen(reqI).read().decode('utf-8')
+                            objI = s3_resource.Object(the_bucket,the_rds_ingest_job_script_file_key)
+                            objI.put(Body = urlDataI)
+                            reqU = urllib.request.Request(the_origin_rds_upsert_job_script_url, method='GET')
+                            urlDataU = urllib.request.urlopen(reqU).read().decode('utf-8')
+                            objU = s3_resource.Object(the_bucket,the_rds_upsert_job_script_file_key)
+                            objU.put(Body = urlDataU)
+                            reqW = urllib.request.Request(the_origin_mysql_connector_url, method='GET')
+                            urlDataW = urllib.request.urlopen(reqW).read()
+                            objW = s3_resource.Object(the_bucket,the_mysql_connector_lib_file_key)
+                            objW.put(Body = urlDataW)
+                            reqF = urllib.request.Request(the_origin_faker_url, method='GET')
+                            urlDataF = urllib.request.urlopen(reqF).read()
+                            objF = s3_resource.Object(the_bucket,the_faker_lib_file_key)
+                            objF.put(Body = urlDataF)
+                        except ClientError as ce:
+                            print("Failed to copy the source code file.")
+                            print(ce)
+                            print(ce.response['ResponseMetadata'])
+                        except urllib.error.HTTPError as e:
+                            print(e)
+                    elif the_event == 'Delete':
+                        try:
+                          pages = []
+                          paginator = s3.get_paginator('list_objects_v2')
+                          for page in paginator.paginate(Bucket=the_bucket):
+                            pages.extend(page['Contents'])
+                          for source in pages:
+                            s3.delete_object(Bucket=the_bucket,Key=source["Key"])
+                        except ClientError as ce:
+                            print(f"Failed to delete the files: {ce}")
+
+                    # Everything OK... send the signal back
+                    print("Completed.")
+                    cfnresponse.send(event,
+                                      context,
+                                      cfnresponse.SUCCESS,
+                                      response_data)
+                except Exception as e:
+                    print("Failed...")
+                    print(str(e))
+                    response_data['Data'] = str(e)
+                    cfnresponse.send(event,
+                                      context,
+                                      cfnresponse.FAILED,
+                                      response_data)
+          - Region: !Ref AWS::Region
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub LambdaExecutionRole-${AWS::StackName}
+      Description: Runs the Lambda function that has permission to upload the job scripts to the S3 bucket.
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+        Version: '2012-10-17'
+      Path: "/"
+      Policies:
+        - PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Effect: Allow
+                Resource: arn:aws:logs:*:*:*
+          PolicyName: !Sub AWSLambda-CW-${AWS::StackName}
+        - PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub arn:aws:s3:::${S3BucketName}/*
+              -
+                Effect: "Allow"
+                Action:
+                  - s3:ListBucket
+                  - s3:GetLifecycleConfiguration
+                Resource:
+                  - !Sub arn:aws:s3:::${S3BucketName}
+          PolicyName: !Sub AWSLambda-S3-${AWS::StackName}
+
+
+  # Kinesis
+  KinesisDataStreamCdc:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: !Sub DataStream-${AWS::StackName}
+      ShardCount: 2
+
+
+  # Glue
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub "database_${AWS::StackName}"
+
+  GlueTableKinesis:
+    DependsOn:
+      - GlueDatabase
+      - KinesisDataStreamCdc
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref GlueDatabase
+      TableInput:
+        Name: !Sub "kinesis_cdc_table"
+        TableType: EXTERNAL_TABLE
+        Parameters: {
+          "classification": "json"
+        }
+        StorageDescriptor:
+          Location: !Ref KinesisDataStreamCdc
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Columns:
+            - Name: data
+              Type: STRUCT<ticket_id:STRING,purchased_by:STRING,created_at:TIMESTAMP,updated_at:TIMESTAMP>
+            - Name: metadata
+              Type: STRUCT<timestamp:TIMESTAMP,record-type:STRING,operation:STRING,partition-key-type:STRING,schema-name:STRING,table-name:STRING,transaction-id:BIGINT>
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+          Parameters:
+            typeOfData: kinesis
+            streamName: !Ref KinesisDataStreamCdc
+            endpointUrl: !Sub 'https://kinesis.${AWS::Region}.amazonaws.com'
+
+  GlueServiceRole:
+    DependsOn:
+      - KinesisDataStreamCdc
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - glue.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      RoleName: !Sub GlueServiceRole-${AWS::StackName}
+      Path: /
+      Policies:
+        - PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub arn:aws:s3:::${S3BucketName}/*
+              -
+                Effect: "Allow"
+                Action:
+                  - s3:ListBucket
+                  - s3:GetLifecycleConfiguration
+                Resource:
+                  - !Sub arn:aws:s3:::${S3BucketName}
+          PolicyName: !Sub GlueServiceRole-S3-${AWS::StackName}
+        - PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - redshift-data:ExecuteStatement
+                Resource:
+                  - !Sub arn:aws:redshift:${AWS::Region}:${AWS::AccountId}:cluster:${RedshiftCluster}
+              -
+                Effect: "Allow"
+                Action:
+                  - redshift-data:DescribeStatement
+                Resource:
+                  - '*'
+              -
+                Effect: "Allow"
+                Action:
+                  - redshift:GetClusterCredentials
+                Resource:
+                  - !Sub arn:aws:redshift:${AWS::Region}:${AWS::AccountId}:dbname:${RedshiftCluster}/dev
+                  - !Sub arn:aws:redshift:${AWS::Region}:${AWS::AccountId}:dbuser:${RedshiftCluster}/${DatabaseUserName}
+          PolicyName: !Sub GlueServiceRole-RedshiftDataAPI-${AWS::StackName}
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:                  
+                  - kinesis:Get*
+                  - kinesis:List*
+                  - kinesis:Describe*
+                  - kinesis:PutRecord
+                  - kinesis:PutRecords
+                Resource: !GetAtt KinesisDataStreamCdc.Arn
+          PolicyName: !Sub GlueServiceRole-KinesisDataAPI-${AWS::StackName}
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+
+  GlueStreamingJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub 'streaming-cdc-kinesis2redshift${AWS::StackName}'
+      Role: !Ref GlueServiceRole
+      Command:
+        Name: gluestreaming
+        ScriptLocation: !Sub 's3://${S3BucketName}/script/streaming_cdc_kinesis2redshift.py'
+        PythonVersion: 3
+      DefaultArguments:
+        --TempDir: !Sub 's3://${S3BucketName}/tmp/'
+        --job-language: python
+        --job-bookmark-option: job-bookmark-disable
+        --enable-metrics: ''
+        --enable-continuous-cloudwatch-log: true
+        --additional-python-modules: boto3==1.18.13
+        --src_glue_database_name: !Ref GlueDatabase
+        --src_glue_table_name: !Ref GlueTableKinesis
+        --rds_connection_name: !Ref GlueMySQLConnection
+        --rds_db_endpoint: !Sub "jdbc:mysql://${RDS.Endpoint.Address}:${RDS.Endpoint.Port}/dev"
+        --src_rds_table_name_sport_event: sport_event
+        --src_rds_table_name_ticket: ticket
+        --src_rds_table_name_customer: customer
+        --dst_redshift_database_name: dev
+        --dst_redshift_schema_name: public
+        --dst_redshift_table_name: sport_event_activity
+        --dst_redshift_db_user: !Ref DatabaseUserName
+        --dst_redshift_cluster_identifier: !Ref RedshiftCluster
+        --primary_keys: ticket_id
+        --redshift_connection_name: !Ref GlueRedshiftConnection
+      WorkerType: G.1X
+      NumberOfWorkers: 2
+      GlueVersion: 3.0
+      Connections:
+        Connections:
+          - !Ref GlueRedshiftConnection
+
+  GlueInitialDataLoadRDSJob:
+    DependsOn: RDS
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub 'rds-ingest-data-initial-${AWS::StackName}'
+      Role: !Ref GlueServiceRole
+      Command:
+        Name: pythonshell
+        ScriptLocation: !Sub 's3://${S3BucketName}/script/rds_ingest_data.py'
+        PythonVersion: 3
+      DefaultArguments:
+        --db_host: !GetAtt RDS.Endpoint.Address
+        --db_port: !GetAtt RDS.Endpoint.Port
+        --db_database: dev
+        --db_user: !Ref DatabaseUserName
+        --db_password: !Ref DatabaseUserPassword
+        --mode: initial
+        --TempDir: !Sub 's3://${S3BucketName}/tmp/'
+        --job-language: python
+        --extra-py-files: !Sub 's3://${S3BucketName}/lib/mysql_connector_python-8.0.25-cp38-cp38-manylinux1_x86_64.whl,s3://${S3BucketName}/lib/Faker-8.11.0-py3-none-any.whl'
+      GlueVersion: 1.0
+      MaxCapacity: 0.0625
+      Connections:
+        Connections:
+          - !Ref GlueMySQLConnection
+
+  GlueIncrementalDataLoadRDSJob:
+    DependsOn: RDS
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub 'rds-ingest-data-incremental-${AWS::StackName}'
+      Role: !Ref GlueServiceRole
+      Command:
+        Name: pythonshell
+        ScriptLocation: !Sub 's3://${S3BucketName}/script/rds_ingest_data.py'
+        PythonVersion: 3
+      DefaultArguments:
+        --db_host: !GetAtt RDS.Endpoint.Address
+        --db_port: !GetAtt RDS.Endpoint.Port
+        --db_database: dev
+        --db_user: !Ref DatabaseUserName
+        --db_password: !Ref DatabaseUserPassword
+        --mode: incremental
+        --TempDir: !Sub 's3://${S3BucketName}/tmp/'
+        --job-language: python
+        --extra-py-files: !Sub 's3://${S3BucketName}/lib/mysql_connector_python-8.0.25-cp38-cp38-manylinux1_x86_64.whl,s3://${S3BucketName}/lib/Faker-8.11.0-py3-none-any.whl'
+      ExecutionProperty:
+        MaxConcurrentRuns: 3
+      GlueVersion: 1.0
+      MaxCapacity: 0.0625
+      Connections:
+        Connections:
+          - !Ref GlueMySQLConnection
+
+  GlueUpsertRDSJob:
+    DependsOn: RDS
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub 'rds-upsert-data-${AWS::StackName}'
+      Role: !Ref GlueServiceRole
+      Command:
+        Name: pythonshell
+        ScriptLocation: !Sub 's3://${S3BucketName}/script/rds_upsert_data.py'
+        PythonVersion: 3
+      DefaultArguments:
+        --db_host: !GetAtt RDS.Endpoint.Address
+        --db_port: !GetAtt RDS.Endpoint.Port
+        --db_database: dev
+        --db_user: !Ref DatabaseUserName
+        --db_password: !Ref DatabaseUserPassword
+        --ticket_id_to_be_updated: '1'
+        --TempDir: !Sub 's3://${S3BucketName}/tmp/'
+        --job-language: python
+        --extra-py-files: !Sub 's3://${S3BucketName}/lib/mysql_connector_python-8.0.25-cp38-cp38-manylinux1_x86_64.whl,s3://${S3BucketName}/lib/Faker-8.11.0-py3-none-any.whl'
+      GlueVersion: 1.0
+      MaxCapacity: 0.0625
+      Connections:
+        Connections:
+          - !Ref GlueMySQLConnection
+
+  PeriodicalTrigger:
+    DependsOn:
+      - GlueIncrementalDataLoadRDSJob
+      - RDS
+    Type: AWS::Glue::Trigger
+    Properties:
+      Name: !Sub 'periodical-trigger-${AWS::StackName}'
+      Description: Glue trigger which triggers incremental data load to RDS
+      Type: SCHEDULED
+      Schedule: cron(* * * * ? *)
+      Actions:
+        - JobName: !Ref GlueIncrementalDataLoadRDSJob
+
+  GlueRedshiftConnection:
+    Type: AWS::Glue::Connection
+    Properties:
+      ConnectionInput:
+        Name: !Sub 'redshift-connection-${AWS::StackName}'
+        ConnectionType: JDBC
+        MatchCriteria: []
+        PhysicalConnectionRequirements:
+          AvailabilityZone: !Ref SubnetAzA
+          SecurityGroupIdList:
+            - !GetAtt SecurityGroup.GroupId
+          SubnetId: !Ref PrivateSubnetA
+        ConnectionProperties:
+          JDBC_CONNECTION_URL: !Sub "jdbc:redshift://${RedshiftCluster.Endpoint.Address}:${RedshiftCluster.Endpoint.Port}/dev"
+          JDBC_ENFORCE_SSL: false
+          USERNAME: !Ref DatabaseUserName
+          PASSWORD: !Ref DatabaseUserPassword
+      CatalogId: !Ref AWS::AccountId
+
+
+  # Redshift
+  RedshiftCluster:
+    DependsOn: SecurityGroup
+    Type: AWS::Redshift::Cluster
+    Properties:
+      ClusterIdentifier: !Sub "cdc-sample-${AWS::StackName}"
+      ClusterType: single-node
+      NodeType: dc2.large
+      DBName: dev
+      MasterUsername: !Ref DatabaseUserName
+      MasterUserPassword: !Ref DatabaseUserPassword
+      ClusterParameterGroupName: !Ref RedshiftClusterParameterGroup
+      VpcSecurityGroupIds:
+        - !GetAtt SecurityGroup.GroupId
+      ClusterSubnetGroupName: !Ref RedshiftClusterSubnetGroup
+      PubliclyAccessible: 'false'
+      Port: 5439
+
+  RedshiftClusterParameterGroup:
+    Type: AWS::Redshift::ClusterParameterGroup
+    Properties:
+      Description: Cluster parameter group
+      ParameterGroupFamily: redshift-1.0
+      Parameters:
+        - ParameterName: enable_user_activity_logging
+          ParameterValue: 'true'
+
+  RedshiftClusterSubnetGroup:
+    Type: AWS::Redshift::ClusterSubnetGroup
+    Properties:
+      Description: Cluster subnet group
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+
+
+  ## Networking
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VPCCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: !Sub "vpc-${AWS::StackName}"
+
+  PublicSubnet:
+    DependsOn: VPC
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Ref SubnetAzA
+      CidrBlock: !Ref PublicSubnetCIDR
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "public-subnet-${AWS::StackName}"
+
+  PrivateSubnetA:
+    DependsOn: VPC
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Ref SubnetAzA
+      CidrBlock: !Ref PrivateSubnetACIDR
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "private-subnetA-${AWS::StackName}"
+
+  PrivateSubnetB:
+    DependsOn: VPC
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Ref SubnetAzB
+      CidrBlock: !Ref PrivateSubnetBCIDR
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "private-subnetB-${AWS::StackName}"
+
+  PublicRouteTable:
+    DependsOn:
+      - InternetGatewayAttachment
+      - VPC
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "public-route-${AWS::StackName}"
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "private-route-${AWS::StackName}"
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTable
+
+  SecurityGroup:
+    DependsOn: VPC
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "security-group-${AWS::StackName}"
+      VpcId: !Ref VPC
+
+  SecurityGroupIngress:
+    DependsOn: SecurityGroup
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt SecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 0
+      ToPort: 65535
+      SourceSecurityGroupId: !GetAtt SecurityGroup.GroupId
