@@ -1,6 +1,3 @@
-# Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: MIT-0
-
 import sys
 import boto3
 from botocore.exceptions import WaiterError
@@ -19,12 +16,7 @@ params = [
     'JOB_NAME',
     'TempDir',
     'src_glue_database_name',
-    'src_glue_table_name',
-    'rds_connection_name',
-    'rds_db_endpoint',
-    'src_rds_table_name_sport_event',
-    'src_rds_table_name_ticket',
-    'src_rds_table_name_customer',
+    'src_glue_table_name',    
     'dst_redshift_database_name',
     'dst_redshift_schema_name',
     'dst_redshift_table_name',
@@ -36,11 +28,6 @@ params = [
 args = getResolvedOptions(sys.argv, params)
 src_glue_database_name = args["src_glue_database_name"]
 src_glue_table_name = args["src_glue_table_name"]
-rds_connection_name = args["rds_connection_name"]
-rds_db_endpoint = args["rds_db_endpoint"]
-src_rds_table_name_sport_event = args["src_rds_table_name_sport_event"]
-src_rds_table_name_ticket = args["src_rds_table_name_ticket"]
-src_rds_table_name_customer = args["src_rds_table_name_customer"]
 dst_redshift_database_name = args["dst_redshift_database_name"]
 dst_redshift_schema_name = args["dst_redshift_schema_name"]
 dst_redshift_table_name = args["dst_redshift_table_name"]
@@ -102,59 +89,6 @@ data_frame_kinesis = glue_context.create_data_frame.from_catalog(
         "inferSchema": "false"
     }
 )
-jdbc_conf = glue_context.extract_jdbc_conf(connection_name=rds_connection_name)
-
-# Create DynamicFrames from dimension tables on RDS
-df_sport_event = spark.read.format("jdbc") \
-    .option("url", rds_db_endpoint)\
-    .option("driver", "com.mysql.jdbc.Driver")\
-    .option("dbtable", src_rds_table_name_sport_event)\
-    .option("user", jdbc_conf['user'])\
-    .option("password", jdbc_conf['password']).load()
-df_sport_event = df_sport_event.select(
-    col('event_id').cast("int"),
-    col('sport_type'),
-    col('start_date'),
-    col('location')
-)
-df_sport_event.printSchema()
-df_sport_event.show()
-
-df_ticket = spark.read.format("jdbc") \
-    .option("url", rds_db_endpoint) \
-    .option("driver", "com.mysql.jdbc.Driver") \
-    .option("dbtable", src_rds_table_name_ticket) \
-    .option("user", jdbc_conf['user']) \
-    .option("password", jdbc_conf['password']).load()
-df_ticket = df_ticket.select(
-    col('ticket_id').cast("int"),
-    col('event_id').alias('ticket_event_id').cast("int"),
-    col('seat_level'),
-    col('seat_location'),
-    col('ticket_price')
-)
-df_ticket.printSchema()
-df_ticket.show()
-
-df_customer = spark.read.format("jdbc") \
-    .option("url", rds_db_endpoint) \
-    .option("driver", "com.mysql.jdbc.Driver") \
-    .option("dbtable", src_rds_table_name_customer) \
-    .option("user", jdbc_conf['user']) \
-    .option("password", jdbc_conf['password']).load()
-df_customer = df_customer.select(
-    col('customer_id').cast('int'),
-    col('customer_name'),
-    col('email_address'),
-    col('phone_number')
-)
-df_customer.printSchema()
-df_customer.show()
-
-df_ticket_sport_event = df_ticket.join(df_sport_event, df_ticket.ticket_event_id == df_sport_event.event_id, 'inner')
-df_ticket_sport_event.printSchema()
-df_ticket_sport_event.show()
-
 
 def runQuery(query_string):
     query_result = redshift_data.execute_statement(
@@ -173,9 +107,6 @@ def runQuery(query_string):
 
 def processBatch(data_frame, batchId):
     if data_frame.count() > 0:
-        data_frame.printSchema()
-        data_frame.show()
-
         # Filter CDC records with only INSERT or UPDATE
         df_insert_update_only = data_frame.select(col('data.*'), col('metadata.*')) \
             .filter(col('record-type') == 'data') \
@@ -193,36 +124,9 @@ def processBatch(data_frame, batchId):
             )
         df_to_be_staged.show()
 
-        # Denormalize data by joining DataFrame with dimension tables
-        df_denormalized = df_to_be_staged.join(
-            df_ticket_sport_event, df_to_be_staged.activity_ticket_id == df_ticket_sport_event.ticket_id, "inner"
-        )
-        df_denormalized = df_denormalized.join(
-            df_customer, df_denormalized.purchased_by == df_customer.customer_id, "inner"
-        )
+        # Handle DELETE, only mark them do not drop records.
 
-        # Mask/Tokenize data
-        df_enriched = df_denormalized.withColumn('phone_number', regexp_replace('phone_number', r'(\d)', '*')) \
-            .withColumn('email_address', sha2('email_address', 256))
-        df_enriched = df_enriched.select(
-            col('activity_ticket_id').alias("ticket_id").cast("int"),
-            col('ticket_event_id').alias("event_id").cast("int"),
-            col('sport_type'),
-            col('start_date'),
-            col('location'),
-            col('seat_level'),
-            col('seat_location'),
-            col('ticket_price'),
-            col('purchased_by').cast("int"),
-            col('customer_name'),
-            col('email_address'),
-            col('phone_number'),
-            col('created_at'),
-            col('updated_at')
-        )
-        dynamic_frame = DynamicFrame.fromDF(df_enriched, glue_context, "from_data_frame")
-        dynamic_frame.toDF().printSchema()
-        dynamic_frame.toDF().show()
+        # Handle missing seg_num for eventual consistency between book and market
 
         # Pre query for staging table. Using Redshift Data API instead of preactions in order to avoid invalid reference.
         pre_query = f"""
