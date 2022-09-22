@@ -50,7 +50,7 @@ def put_records(df, num):
                     StreamName=stream_name,
                     Records= json.dumps(messages)
                 )
-            time.sleep(2)
+            time.sleep(5)
             
     except:
         print("Error:", sys.exc_info()[0])

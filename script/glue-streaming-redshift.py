@@ -1,14 +1,16 @@
 import sys
 import boto3
+import pyspark.sql.functions as F
 from botocore.exceptions import WaiterError
 from botocore.waiter import WaiterModel
 from botocore.waiter import create_waiter_with_client
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
-from pyspark.sql.functions import col, desc, rank, regexp_replace, sha2
 from pyspark.sql.window import Window
+from pyspark.sql import DataFrame
 from awsglue.context import GlueContext
 from awsglue.job import Job
+from functools import reduce
 
 from awsglue.dynamicframe import DynamicFrame
 
@@ -19,10 +21,10 @@ params = [
     'src_glue_table_name',    
     'dst_redshift_database_name',
     'dst_redshift_schema_name',
-    'dst_redshift_table_name',
+    'deltas_redshift_table_name',
+    'bbo_redshift_view_name',
     'dst_redshift_db_user',
     'dst_redshift_cluster_identifier',
-    'primary_keys',
     'redshift_connection_name'
 ]
 args = getResolvedOptions(sys.argv, params)
@@ -30,12 +32,12 @@ src_glue_database_name = args["src_glue_database_name"]
 src_glue_table_name = args["src_glue_table_name"]
 dst_redshift_database_name = args["dst_redshift_database_name"]
 dst_redshift_schema_name = args["dst_redshift_schema_name"]
-dst_redshift_table_name = args["dst_redshift_table_name"]
+deltas_redshift_table_name = args["deltas_redshift_table_name"]
+bbo_redshift_view_name = args["bbo_redshift_view_name"]
 dst_redshift_db_user = args["dst_redshift_db_user"]
 dst_redshift_cluster_identifier = args["dst_redshift_cluster_identifier"]
-primary_keys = [x.strip() for x in args['primary_keys'].split(',')]
 redshift_connection_name = args["redshift_connection_name"]
-stg_table_name = dst_redshift_table_name + "_stage"
+stg_table_name = deltas_redshift_table_name + "_stage"
 
 sc = SparkContext()
 glue_context = GlueContext(sc)
@@ -105,51 +107,72 @@ def runQuery(query_string):
         print (e)
 
 
+def cleanDeltas(df,key):
+    pass
+
+
 def processBatch(data_frame, batchId):
     if data_frame.count() > 0:
-        # Filter CDC records with only INSERT or UPDATE
-        df_insert_update_only = data_frame.select(col('data.*'), col('metadata.*')) \
-            .filter(col('record-type') == 'data') \
-            .filter((col('operation') == 'insert') | (col('operation') == 'update'))
-        df_insert_update_only.show()
+        # TODO: Filter records to 4 categories: INSERT; UPDATE; DELETE; TRADE base on non-empty id fields.
+        # INSERT; UPDATE; DELETE (0 price, 0 qty) are easy inserts
+        # TRADE turn trade_quantity to negative then insert.
+        # Reduce L3 data from 16 columns to 8, see below
+        
+        columns_names = ["seq_num","order_id","side","price","quantity","delta_time","delta_type"]
 
-        window = Window.partitionBy(primary_keys).orderBy(desc('timestamp'))
-        df_to_be_staged = df_insert_update_only.withColumn('rnk', rank().over(window)) \
-            .filter(col('rnk')==1) \
-            .select(
-                col('ticket_id').alias("activity_ticket_id").cast("int"),
-                col('purchased_by').cast("int"),
-                col('created_at'),
-                col('updated_at')
-            )
-        df_to_be_staged.show()
+        df_add = data_frame.na.drop(subset=["add_order_id"])
+        null_counts = df_add.select([F.count(F.when(F.col(c).isNull(), c)).alias(c) for c in df_add.columns]).collect()[0].asDict()
+        to_drop = [k for k, v in null_counts.items() if v > 0]
+        df_add.drop(*to_drop)
+        df_add.withColumn('delta_type', F.lit("ADD"))
+        df_add.toDF(*columns_names)
 
-        # Handle DELETE, only mark them do not drop records.
+        df_update = data_frame.na.drop(subset=["update_order_id"])
+        null_counts = df_update.select([F.count(F.when(F.col(c).isNull(), c)).alias(c) for c in df_update.columns]).collect()[0].asDict()
+        to_drop = [k for k, v in null_counts.items() if v > 0]
+        df_update.drop(*to_drop)
+        df_update.withColumn('delta_type', F.lit("UPDATE"))
+        df_update.toDF(*columns_names)
 
-        # Handle missing seg_num for eventual consistency between book and market
+        df_trade = data_frame.na.drop(subset=["trade_order_id"])
+        null_counts = df_trade.select([F.count(F.when(F.col(c).isNull(), c)).alias(c) for c in df_trade.columns]).collect()[0].asDict()
+        to_drop = [k for k, v in null_counts.items() if v > 0]
+        df_trade.drop(*to_drop)
+        df_trade.withColumn('delta_type', F.lit("TRADE"))
+        df_trade.toDF(*columns_names)
+
+        df_delete = data_frame.na.drop(subset=["delete_order_id"])
+        null_counts = df_delete.select([F.count(F.when(F.col(c).isNull(), c)).alias(c) for c in df_delete.columns]).collect()[0].asDict()
+        to_drop = [k for k, v in null_counts.items() if v > 0]
+        df_delete.drop(*to_drop)
+        df_delete.withColumnRenamed("delete_order_id","order_id")
+        df_delete.withColumnRenamed("delete_side","side")
+        df_delete.withColumnRenamed("time","delta_time")
+        df_delete.withColumn('price', F.lit(0))
+        df_delete.withColumn('quantity', F.lit(0))
+        df_delete.withColumn('delta_type', F.lit("DELETE"))    
+
+        dfs = [df_add, df_update, df_trade, df_delete]
+        df_to_be_staged = reduce(DataFrame.unionByName, dfs)
+
 
         # Pre query for staging table. Using Redshift Data API instead of preactions in order to avoid invalid reference.
         pre_query = f"""
-        create table if not exists {dst_redshift_schema_name}.{dst_redshift_table_name} (
-            ticket_id INT NOT NULL,
-            event_id INT NOT NULL,
-            sport_type VARCHAR(MAX) NOT NULL,
-            start_date TIMESTAMP NOT NULL,
-            location VARCHAR(MAX) NOT NULL,
-            seat_level VARCHAR(MAX) NOT NULL,
-            seat_location VARCHAR(MAX) NOT NULL,
-            ticket_price INT NOT NULL,
-            purchased_by INT NOT NULL,
-            customer_name VARCHAR(MAX) NOT NULL,
-            email_address VARCHAR(MAX) NOT NULL,
-            phone_number VARCHAR(MAX) NOT NULL,
-            created_at TIMESTAMP NOT NULL,
-            updated_at TIMESTAMP NOT NULL,
-            PRIMARY KEY (ticket_id)
+        CREATE TABLE IF NOT EXISTS {dst_redshift_schema_name}.{deltas_redshift_table_name} (
+            seq_num INT8 NOT NULL,
+            order_id INT8 NOT NULL,
+            side VARCHAR(4) NOT NULL,
+            price FLOAT NOT NULL,
+            quantity INT NOT NULL,
+            delta_time TIMESTAMP NOT NULL,
+            delta_type VARCHAR(6) NOT NULL
+            PRIMARY KEY (seq_num)
         );
-        drop table if exists {dst_redshift_schema_name}.{stg_table_name};
-        create table {dst_redshift_schema_name}.{stg_table_name} 
-            as select * from {dst_redshift_schema_name}.{dst_redshift_table_name} where 1=2;
+
+        DROP TABLE IF EXISTS {dst_redshift_schema_name}.{stg_table_name};
+
+        CREATE TABLE {dst_redshift_schema_name}.{stg_table_name} 
+            AS SELECT * FROM {dst_redshift_schema_name}.{deltas_redshift_table_name} WHERE 1=2;
         """
         runQuery(pre_query)
 
@@ -157,35 +180,34 @@ def processBatch(data_frame, batchId):
         condition_expression = ""
         for i, primary_key in enumerate(primary_keys):
             if i == 0:
-                condition_expression = condition_expression + f"{dst_redshift_schema_name}.{stg_table_name}.{primary_key} = {dst_redshift_schema_name}.{dst_redshift_table_name}.{primary_key}"
+                condition_expression = condition_expression + f"{dst_redshift_schema_name}.{stg_table_name}.{primary_key} = {dst_redshift_schema_name}.{deltas_redshift_table_name}.{primary_key}"
             else:
-                condition_expression = condition_expression + " and " + f"{dst_redshift_schema_name}.{stg_table_name}.{primary_key} = {dst_redshift_schema_name}.{dst_redshift_table_name}.{primary_key}"
+                condition_expression = condition_expression + " and " + f"{dst_redshift_schema_name}.{stg_table_name}.{primary_key} = {dst_redshift_schema_name}.{deltas_redshift_table_name}.{primary_key}"
+
         post_query = f"""
-            delete from {dst_redshift_schema_name}.{dst_redshift_table_name} 
-                using {dst_redshift_schema_name}.{stg_table_name} 
-                where {condition_expression}; 
-            insert into {dst_redshift_schema_name}.{dst_redshift_table_name} 
-                select 
-                    ticket_id,
-                    event_id,
-                    sport_type,
-                    start_date,
-                    location,
-                    seat_level,
-                    seat_location,
-                    ticket_price,
-                    purchased_by,
-                    customer_name,
-                    email_address,
-                    phone_number, 
-                    created_at, 
-                    updated_at 
-                from {dst_redshift_schema_name}.{stg_table_name} where ticket_id is not NULL; 
-            drop table {dst_redshift_schema_name}.{stg_table_name}
+            DELETE FROM {dst_redshift_schema_name}.{deltas_redshift_table_name} 
+                USING {dst_redshift_schema_name}.{stg_table_name} 
+                WHERE {condition_expression}
+            ; 
+
+            INSERT INTO {dst_redshift_schema_name}.{deltas_redshift_table_name} 
+                SELECT 
+                    seq_num,
+                    order_id,
+                    side,
+                    price,
+                    quantity,
+                    delta_time,
+                    delta_type
+                FROM {dst_redshift_schema_name}.{stg_table_name} WHERE seq_num IS NOT NULL
+            ;                        
+
+            DROP TABLE {dst_redshift_schema_name}.{stg_table_name}
+            ;
         """
 
         datasink = glue_context.write_dynamic_frame.from_jdbc_conf(
-            frame=dynamic_frame,
+            frame=df_to_be_staged,
             catalog_connection=redshift_connection_name,
             connection_options={
                 "database": dst_redshift_database_name,
@@ -197,12 +219,12 @@ def processBatch(data_frame, batchId):
         )
 
 
-# Read from the DataFrame coming via Kinesis, and run processBatch method for batches in every 100 seconds
+# Read from the DataFrame coming via Kinesis, and run processBatch method for batches in every 30 seconds
 glue_context.forEachBatch(
     frame=data_frame_kinesis,
     batch_function=processBatch,
     options={
-        "windowSize": "100 seconds",
+        "windowSize": "5 seconds",
         "checkpointLocation": f"{args['TempDir']}/checkpoint/{args['JOB_NAME']}/"
     }
 )

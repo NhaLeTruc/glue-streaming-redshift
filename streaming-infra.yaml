@@ -268,10 +268,38 @@ Resources:
           InputFormat: org.apache.hadoop.mapred.TextInputFormat
           OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
           Columns:
-            - Name: data
-              Type: STRUCT<ticket_id:STRING,purchased_by:STRING,created_at:TIMESTAMP,updated_at:TIMESTAMP>
-            - Name: metadata
-              Type: STRUCT<timestamp:TIMESTAMP,record-type:STRING,operation:STRING,partition-key-type:STRING,schema-name:STRING,table-name:STRING,transaction-id:BIGINT>
+            - Name: seq_num
+              Type: bigint
+            - Name: add_order_id
+              Type: bigint
+            - Name: add_side
+              Type: string
+            - Name: add_price
+              Type: double
+            - Name: add_qty
+              Type: bigint		
+            - Name: update_order_id
+              Type: bigint
+            - Name: update_side
+              Type: string
+            - Name: update_price
+              Type: double
+            - Name: update_qty
+              Type: bigint
+            - Name: delete_order_id
+              Type: bigint
+            - Name: delete_side
+              Type: string
+            - Name: trade_order_id
+              Type: bigint
+            - Name: trade_side
+              Type: string
+            - Name: trade_price
+              Type: double
+            - Name: trade_qty
+              Type: bigint
+            - Name: time
+              Type: timestamp
           SerdeInfo:
             SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
           Parameters:
@@ -460,11 +488,11 @@ Resources:
         --src_glue_database_name: !Ref GlueDatabase
         --src_glue_table_name: !Ref GlueTableKinesis
         --dst_redshift_database_name: dev
-        --dst_redshift_schema_name: public
-        --dst_redshift_table_name: sport_event_activity
+        --dst_redshift_schema_name: book
+        --deltas_redshift_table_name: deltas
+        --bbo_redshift_view_name: bbo
         --dst_redshift_db_user: !Ref DatabaseUserName
         --dst_redshift_cluster_identifier: !Ref RedshiftCluster
-        --primary_keys: ticket_id
         --redshift_connection_name: !Ref GlueRedshiftConnection
       WorkerType: G.1X
       NumberOfWorkers: 2
