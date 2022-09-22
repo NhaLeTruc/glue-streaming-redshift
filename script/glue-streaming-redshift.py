@@ -177,17 +177,11 @@ def processBatch(data_frame, batchId):
         runQuery(pre_query)
 
         # Post query for staging
-        condition_expression = ""
-        for i, primary_key in enumerate(primary_keys):
-            if i == 0:
-                condition_expression = condition_expression + f"{dst_redshift_schema_name}.{stg_table_name}.{primary_key} = {dst_redshift_schema_name}.{deltas_redshift_table_name}.{primary_key}"
-            else:
-                condition_expression = condition_expression + " and " + f"{dst_redshift_schema_name}.{stg_table_name}.{primary_key} = {dst_redshift_schema_name}.{deltas_redshift_table_name}.{primary_key}"
 
         post_query = f"""
             DELETE FROM {dst_redshift_schema_name}.{deltas_redshift_table_name} 
                 USING {dst_redshift_schema_name}.{stg_table_name} 
-                WHERE {condition_expression}
+                WHERE {dst_redshift_schema_name}.{deltas_redshift_table_name}.seq_num = {dst_redshift_schema_name}.{stg_table_name}.seq_num
             ; 
 
             INSERT INTO {dst_redshift_schema_name}.{deltas_redshift_table_name} 
