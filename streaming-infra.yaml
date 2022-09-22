@@ -1,4 +1,5 @@
 # aws cloudformation create-stack --stack-name stream-redshift --template-body file://streaming-infra.yaml --capabilities CAPABILITY_NAMED_IAM --parameters ParameterKey=S3BucketName,ParameterValue=280887266599-streaming-redshift ParameterKey=DatabaseUserPassword,ParameterValue=Ok4D6GyaELiC ParameterKey=SubnetAzA,ParameterValue=ap-southeast-1a ParameterKey=SubnetAzB,ParameterValue=ap-southeast-1b
+# aws cloudformation update-stack --stack-name stream-redshift --template-body file://streaming-infra.yaml --capabilities CAPABILITY_NAMED_IAM --parameters ParameterKey=S3BucketName,ParameterValue=280887266599-streaming-redshift ParameterKey=DatabaseUserPassword,ParameterValue=Ok4D6GyaELiC ParameterKey=SubnetAzA,ParameterValue=ap-southeast-1a ParameterKey=SubnetAzB,ParameterValue=ap-southeast-1b
 Parameters:
   S3BucketName:
     Type: String
@@ -505,7 +506,7 @@ Resources:
     DependsOn: KinesisDataStream
     Type: AWS::Glue::Job
     Properties:
-      Name: !Sub 'glue-data-generator-${AWS::StackName}'
+      Name: !Sub 'data-generator-${AWS::StackName}'
       Role: !Ref GlueServiceRole
       Command:
         Name: glueetl
@@ -521,8 +522,7 @@ Resources:
         --job-language: python
       ExecutionProperty:
         MaxConcurrentRuns: 3
-      GlueVersion: 1.0
-      MaxCapacity: 0.0625   
+      GlueVersion: 3.0 
 
   GlueRedshiftConnection:
     Type: AWS::Glue::Connection
@@ -549,7 +549,7 @@ Resources:
     DependsOn: SecurityGroup
     Type: AWS::Redshift::Cluster
     Properties:
-      ClusterIdentifier: !Sub "cdc-sample-${AWS::StackName}"
+      ClusterIdentifier: !Sub "book-${AWS::StackName}"
       ClusterType: single-node
       NodeType: dc2.large
       DBName: dev
@@ -661,6 +661,51 @@ Resources:
     Properties:
       SubnetId: !Ref PrivateSubnetB
       RouteTableId: !Ref PrivateRouteTable
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "igw-${AWS::StackName}"
+
+  InternetGatewayAttachment:
+    DependsOn: VPC
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  InternetGatewayRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  NatGatewayRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      NatGatewayId: !Ref NATGateway
+
+  NATGateway:
+    DependsOn:
+      - NATGatewayEIP
+      - PublicSubnet
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NATGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet
+      Tags:
+        - Key: Name
+          Value: !Sub "natgw-${AWS::StackName}"
+
+  NATGatewayEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
 
   SecurityGroup:
     DependsOn: VPC

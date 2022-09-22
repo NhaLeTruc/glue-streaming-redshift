@@ -1,4 +1,3 @@
-seq_num,add_order_id,add_side,add_price,add_qty,update_order_id,update_side,update_price,update_qty,delete_order_id,delete_side,trade_order_id,trade_side,trade_price,trade_qty,time
 1627942268920653172,7456389231055194163,BUY,218,300,,,,,,,,,,,2021-08-02 22:11:21.94404 UTC
 1627942268920653171,7455201758497478055,BUY,228,50,,,,,,,,,,,2021-08-02 22:11:21.94404 UTC
 1627942268920653173,7457972527797789251,BUY,228.2,300,,,,,,,,,,,2021-08-03 01:00:01.107428 UTC
