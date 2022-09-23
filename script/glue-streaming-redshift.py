@@ -43,7 +43,7 @@ job = Job(glue_context)
 job.init(args['JOB_NAME'], args)
 
 redshift_data = boto3.client('redshift-data')
-# custom waiter for Redshift Data API
+
 waiter_config = {
     'version': 2,
     'waiters': {

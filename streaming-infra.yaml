@@ -472,7 +472,7 @@ Resources:
   GlueStreamingJob:
     Type: AWS::Glue::Job
     Properties:
-      Name: !Sub 'streaming-kinesis2redshift${AWS::StackName}'
+      Name: !Sub 'streaming-kinesis2redshift-${AWS::StackName}'
       Role: !Ref GlueServiceRole
       Command:
         Name: gluestreaming
