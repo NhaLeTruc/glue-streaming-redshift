@@ -270,37 +270,37 @@ Resources:
           OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
           Columns:
             - Name: seq_num
-              Type: bigint
+              Type: string
             - Name: add_order_id
-              Type: bigint
+              Type: string
             - Name: add_side
               Type: string
             - Name: add_price
-              Type: double
+              Type: string
             - Name: add_qty
-              Type: bigint		
+              Type: string		
             - Name: update_order_id
-              Type: bigint
+              Type: string
             - Name: update_side
               Type: string
             - Name: update_price
-              Type: double
+              Type: string
             - Name: update_qty
-              Type: bigint
+              Type: string
             - Name: delete_order_id
-              Type: bigint
+              Type: string
             - Name: delete_side
               Type: string
             - Name: trade_order_id
-              Type: bigint
+              Type: string
             - Name: trade_side
               Type: string
             - Name: trade_price
-              Type: double
+              Type: string
             - Name: trade_qty
-              Type: bigint
+              Type: string
             - Name: time
-              Type: timestamp
+              Type: string
           SerdeInfo:
             SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
           Parameters:
@@ -324,37 +324,37 @@ Resources:
           OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
           Columns:
           - Name: seq_num
-            Type: bigint
+            Type: string
           - Name: add_order_id
-            Type: bigint
+            Type: string
           - Name: add_side
             Type: string
           - Name: add_price
-            Type: double
+            Type: string
           - Name: add_qty
-            Type: bigint		
+            Type: string		
           - Name: update_order_id
-            Type: bigint
+            Type: string
           - Name: update_side
             Type: string
           - Name: update_price
-            Type: double
+            Type: string
           - Name: update_qty
-            Type: bigint
+            Type: string
           - Name: delete_order_id
-            Type: bigint
+            Type: string
           - Name: delete_side
             Type: string
           - Name: trade_order_id
-            Type: bigint
+            Type: string
           - Name: trade_side
             Type: string
           - Name: trade_price
-            Type: double
+            Type: string
           - Name: trade_qty
-            Type: bigint
+            Type: string
           - Name: time
-            Type: timestamp
+            Type: string
           InputFormat: org.apache.hadoop.mapred.TextInputFormat
           Location: !Sub s3://${S3BucketName}/data/level=3/
           SerdeInfo:
@@ -378,17 +378,17 @@ Resources:
           OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
           Columns:
           - Name: time
-            Type: timestamp
+            Type: string
           - Name: bid_price
-            Type: double
+            Type: string
           - Name: ask_price
-            Type: double
+            Type: string
           - Name: bid_size
-            Type: bigint
+            Type: string
           - Name: ask_size
-            Type: bigint		
+            Type: string		
           - Name: seq_num
-            Type: bigint          
+            Type: string          
           InputFormat: org.apache.hadoop.mapred.TextInputFormat
           Location: !Sub s3://${S3BucketName}/data/level=1/
           SerdeInfo:

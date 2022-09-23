@@ -41,12 +41,17 @@ w = Window().orderBy(lit('a'))
 src_df = src_df.withColumn("row_num", row_number().over(w))
 src_df_len = int(src_df.count())
 
+print(src_df_len)
+print(src_df.head(10))
+
 def put_records(df, num):
     try:
         for x in range(1,src_df_len,num):
             records = df.filter(df.row_num.between(x,x+num-1)).select()
+            print(records.head(10))
             messages = records.rdd.map(lambda row: row.asDict()).collect()
-            push_to_kinesis = [{'Data': json.dumps(record),'PartitionKey':str(hash(record['seq_num']))} for record in messages]
+            print(messages[0:10])
+            push_to_kinesis = [{'Data': json.dumps(record),'PartitionKey':str(hash(record['time']))} for record in messages]
             response = kinesis_client.put_records(
                     StreamName=stream_name,
                     Records=push_to_kinesis
