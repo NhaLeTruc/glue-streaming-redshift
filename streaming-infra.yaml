@@ -242,6 +242,7 @@ Resources:
 
 
   # Glue
+  # TODO: Lambda function which start GlueGenerateDataJob then GlueStreamingJob
   GlueDatabase:
     Type: AWS::Glue::Database
     Properties:
